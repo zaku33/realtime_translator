@@ -12,6 +12,27 @@ from PIL import Image
 import io
 import pygetwindow as gw
 
+class BITMAPINFOHEADER(ctypes.Structure):
+    _fields_ = [
+        ("biSize", ctypes.wintypes.DWORD),
+        ("biWidth", ctypes.wintypes.LONG),
+        ("biHeight", ctypes.wintypes.LONG),
+        ("biPlanes", ctypes.wintypes.WORD),
+        ("biBitCount", ctypes.wintypes.WORD),
+        ("biCompression", ctypes.wintypes.DWORD),
+        ("biSizeImage", ctypes.wintypes.DWORD),
+        ("biXPelsPerMeter", ctypes.wintypes.LONG),
+        ("biYPelsPerMeter", ctypes.wintypes.LONG),
+        ("biClrUsed", ctypes.wintypes.DWORD),
+        ("biClrImportant", ctypes.wintypes.DWORD)
+    ]
+
+class BITMAPINFO(ctypes.Structure):
+    _fields_ = [
+        ("bmiHeader", BITMAPINFOHEADER),
+        ("bmiColors", ctypes.wintypes.DWORD * 3)
+    ]
+
 class TranslatorOverlay:
     def __init__(self, root):
         self.root = root
@@ -234,54 +255,93 @@ class TranslatorOverlay:
         label.place(x=x, y=y, width=w, height=h)
         self.text_labels.append(label)
 
+    def capture_window_image(self, hwnd, width, height):
+        user32 = ctypes.windll.user32
+        gdi32 = ctypes.windll.gdi32
+
+        hwndDC = user32.GetWindowDC(hwnd)
+        mfcDC  = gdi32.CreateCompatibleDC(hwndDC)
+        saveBitMap = gdi32.CreateCompatibleBitmap(hwndDC, width, height)
+        gdi32.SelectObject(mfcDC, saveBitMap)
+
+        # PW_RENDERFULLCONTENT = 2
+        result = user32.PrintWindow(hwnd, mfcDC, 2)
+        
+        if not result:
+            user32.ReleaseDC(hwnd, hwndDC)
+            gdi32.DeleteDC(mfcDC)
+            gdi32.DeleteObject(saveBitMap)
+            return None
+
+        bmi = BITMAPINFO()
+        bmi.bmiHeader.biSize = ctypes.sizeof(BITMAPINFOHEADER)
+        bmi.bmiHeader.biWidth = width
+        bmi.bmiHeader.biHeight = -height # Top-down
+        bmi.bmiHeader.biPlanes = 1
+        bmi.bmiHeader.biBitCount = 32
+        bmi.bmiHeader.biCompression = 0
+
+        buffer = ctypes.create_string_buffer(width * height * 4)
+        gdi32.GetDIBits(mfcDC, saveBitMap, 0, height, buffer, ctypes.byref(bmi), 0)
+
+        user32.ReleaseDC(hwnd, hwndDC)
+        gdi32.DeleteDC(mfcDC)
+        gdi32.DeleteObject(saveBitMap)
+
+        try:
+            image = Image.frombuffer('RGBA', (width, height), buffer, 'raw', 'BGRA', 0, 1)
+            return image.convert('RGB')
+        except Exception as e:
+            print(f"PIL Error: {e}")
+            return None
+
     def capture_loop(self):
-        with mss.mss() as sct:
-            while self.running:
+        while self.running:
+            try:
+                # Find target window
                 try:
-                    # Find target window
-                    try:
-                        windows = gw.getWindowsWithTitle(self.target_window_title)
-                        if not windows:
-                            print(f"Window '{self.target_window_title}' not found.")
-                            time.sleep(2)
-                            continue
-                        win = windows[0]
-                    except Exception as e:
-                        print(f"Window search error: {e}")
+                    windows = gw.getWindowsWithTitle(self.target_window_title)
+                    if not windows:
+                        print(f"Window '{self.target_window_title}' not found.")
                         time.sleep(2)
                         continue
-
-                    # Important: Update overlay to follow the target window
-                    if not self.update_overlay_geometry(win):
-                        time.sleep(1)
-                        continue
-                        
-                    x, y, w, h = win.left, win.top, win.width, win.height
-                    
-                    if w <= 0 or h <= 0:
-                        continue
-                        
-                    monitor = {"top": y, "left": x, "width": w, "height": h}
-                    
-                    # Grab the pixel data
-                    sct_img = sct.grab(monitor)
-                    target_image = Image.frombytes("RGB", sct_img.size, sct_img.bgra, "raw", "BGRX")
-                    
-                    # Convert to bytes for easyocr
-                    img_byte_arr = io.BytesIO()
-                    target_image.save(img_byte_arr, format='PNG')
-                    img_bytes = img_byte_arr.getvalue()
-                    
-                    # Run OCR
-                    results = self.perform_ocr_sync(img_bytes)
-                    
-                    # Process results main thread
-                    self.root.after(0, self.process_ocr_results, results)
-                    
+                    win = windows[0]
                 except Exception as e:
-                    print(f"Error in capture loop: {e}")
+                    print(f"Window search error: {e}")
+                    time.sleep(2)
+                    continue
+
+                # Important: Update overlay to follow the target window
+                if not self.update_overlay_geometry(win):
+                    time.sleep(1)
+                    continue
                     
-                time.sleep(3) # Throttle to prevent system overload and unnecessary translation
+                x, y, w, h = win.left, win.top, win.width, win.height
+                
+                if w <= 0 or h <= 0:
+                    continue
+                    
+                target_image = self.capture_window_image(win._hWnd, w, h)
+                if not target_image:
+                    print("Failed to capture specific window, it might be minimized or hardware-accelerated.")
+                    time.sleep(1)
+                    continue
+                
+                # Convert to bytes for easyocr
+                img_byte_arr = io.BytesIO()
+                target_image.save(img_byte_arr, format='PNG')
+                img_bytes = img_byte_arr.getvalue()
+                
+                # Run OCR
+                results = self.perform_ocr_sync(img_bytes)
+                
+                # Process results main thread
+                self.root.after(0, self.process_ocr_results, results)
+                
+            except Exception as e:
+                print(f"Error in capture loop: {e}")
+                
+            time.sleep(3) # Throttle to prevent system overload and unnecessary translation
 
     def perform_ocr_sync(self, img_bytes):
         return asyncio.run(self.perform_ocr_async(img_bytes))
