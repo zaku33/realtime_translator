@@ -4,7 +4,8 @@ import ctypes.wintypes
 from tkinter import ttk
 import mss
 import mss.tools
-import requests
+import argostranslate.package
+import argostranslate.translate
 import asyncio
 import threading
 import time
@@ -46,27 +47,35 @@ class TranslatorOverlay:
         
         # Native OCR is used natively
         
-        # Ollama config
-        self.ollama_url = "http://localhost:11434/api/generate"
-        self.model_name = "qwen2:1.5b"
+        # Offline Translation config
+        self.status_label = tk.Label(control_frame, text="Ready", fg="blue", font=("Arial", 8))
+        self.status_label.pack(side=tk.BOTTOM, anchor=tk.W, pady=(0, 2))
         
-        # Control Panel UI
-        control_frame = tk.Frame(self.root, padx=10, pady=10)
-        control_frame.pack(fill=tk.BOTH, expand=True)
+        # Variables and mapping
+        self.lang_codes = {
+            "Vietnamese": "vi", "English": "en", "Spanish": "es",
+            "French": "fr", "Japanese": "ja", "Korean": "ko",
+            "Chinese": "zh", "German": "de", "Italian": "it"
+        }
+        self.languages = list(self.lang_codes.keys())
         
-        tk.Label(control_frame, text="Select Window to Translate:", font=("Arial", 10, "bold")).pack(anchor=tk.W, pady=(0, 5))
-        
-        # Dropdown for windows
-        self.window_var = tk.StringVar()
-        self.window_dropdown = ttk.Combobox(control_frame, textvariable=self.window_var, state="readonly")
-        self.window_dropdown.pack(fill=tk.X, pady=(0, 10))
-        # Dropdown for target language
-        tk.Label(control_frame, text="Target Language:", font=("Arial", 10, "bold")).pack(anchor=tk.W, pady=(5, 5))
-        self.language_var = tk.StringVar(value="Vietnamese")
-        self.languages = ["Vietnamese", "English", "Spanish", "French", "Japanese", "Korean", "Chinese", "German", "Italian"]
-        self.language_dropdown = ttk.Combobox(control_frame, textvariable=self.language_var, values=self.languages, state="readonly")
-        self.language_dropdown.pack(fill=tk.X, pady=(0, 10))
-        self.language_dropdown.bind("<<ComboboxSelected>>", self.on_language_change)
+        # Language Selection UI
+        lang_frame = tk.Frame(control_frame)
+        lang_frame.pack(fill=tk.X, pady=(0, 10))
+
+        # Source Language
+        tk.Label(lang_frame, text="Source:", font=("Arial", 9, "bold")).grid(row=0, column=0, sticky=tk.W)
+        self.source_var = tk.StringVar(value="English")
+        self.source_dropdown = ttk.Combobox(lang_frame, textvariable=self.source_var, values=self.languages, state="readonly", width=12)
+        self.source_dropdown.grid(row=0, column=1, padx=(5, 10))
+        self.source_dropdown.bind("<<ComboboxSelected>>", self.on_language_change)
+
+        # Target Language
+        tk.Label(lang_frame, text="Target:", font=("Arial", 9, "bold")).grid(row=0, column=2, sticky=tk.W)
+        self.target_var = tk.StringVar(value="Vietnamese")
+        self.target_dropdown = ttk.Combobox(lang_frame, textvariable=self.target_var, values=self.languages, state="readonly", width=12)
+        self.target_dropdown.grid(row=0, column=3, padx=(5, 0))
+        self.target_dropdown.bind("<<ComboboxSelected>>", self.on_language_change)
         
         # Buttons
         btn_frame = tk.Frame(control_frame)
@@ -414,23 +423,53 @@ class TranslatorOverlay:
             if self.running:
                 self.root.after(0, self.draw_translated_text, bbox, translated)
 
-    def translate_text(self, text):
-        target_lang = self.language_var.get()
-        prompt = f"Translate the following text to {target_lang}. Only output the translation, no extra words or explanations:\n\n{text}"
-        payload = {
-            "model": self.model_name,
-            "prompt": prompt,
-            "stream": False
-        }
+    def ensure_model_installed(self, from_code, to_code):
+        installed_languages = argostranslate.translate.get_installed_languages()
+        
+        from_lang = next((l for l in installed_languages if l.code == from_code), None)
+        to_lang = next((l for l in installed_languages if l.code == to_code), None)
+
+        if from_lang and to_lang and from_lang.get_translation(to_lang):
+            return True
+
+        self.root.after(0, lambda: self.status_label.config(text=f"Downloading {from_code}->{to_code} model..."))
         try:
-            response = requests.post(self.ollama_url, json=payload, timeout=10)
-            if response.status_code == 200:
-                data = response.json()
-                return data.get("response", "").strip()
+            argostranslate.package.update_package_index()
+            available_packages = argostranslate.package.get_available_packages()
+            package_to_install = next(
+                filter(
+                    lambda x: x.from_code == from_code and x.to_code == to_code, available_packages
+                ), None
+            )
+            if package_to_install:
+                argostranslate.package.install_from_path(package_to_install.download())
+                self.root.after(0, lambda: self.status_label.config(text="Model installed! Ready."))
+                return True
             else:
-                return f"Error: Ollama returned {response.status_code}"
-        except requests.exceptions.RequestException:
-            return "Error: Could not connect to Ollama. Is it running?"
+                self.root.after(0, lambda: self.status_label.config(text=f"Model {from_code}->{to_code} not found!"))
+                return False
+        except Exception as e:
+            self.root.after(0, lambda: self.status_label.config(text=f"Error downloading model: {e}"))
+            return False
+
+    def translate_text(self, text):
+        from_lang = self.source_var.get()
+        to_lang = self.target_var.get()
+        
+        if from_lang == to_lang:
+            return text
+            
+        from_code = self.lang_codes.get(from_lang, "en")
+        to_code = self.lang_codes.get(to_lang, "vi")
+        
+        if not self.ensure_model_installed(from_code, to_code):
+            return "Error: Language pair not supported or failed to download."
+            
+        try:
+            translated_text = argostranslate.translate.translate(text, from_code, to_code)
+            return translated_text
+        except Exception as e:
+            return f"Error: {str(e)}"
 
     def stop(self):
         self.running = False

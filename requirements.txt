@@ -5,7 +5,7 @@ winrt-Windows.Storage.Streams
 winrt-Windows.Foundation.Collections
 winrt-Windows.Foundation
 winrt-Windows.Globalization
-requests
+argostranslate
 pillow
 keyboard
 urllib3
